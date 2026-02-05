@@ -1,7 +1,7 @@
 import os
 import torch
 from typing import Optional, Tuple, Union, List
-from transformers import AutoTokenizer, AutoConfig, logging
+from transformers import AutoTokenizer, AutoConfig, logging, Qwen2ForCausalLM
 from transformers.modeling_outputs import CausalLMOutputWithPast, CausalLMOutputWithCrossAttentions
 from sven.hf import CodeGenForCausalLM, XGLMForCausalLM, GPT2LMHeadCustomModel, GPT2CustomConfig
 
@@ -247,6 +247,90 @@ class SantaPrefixLM(GPT2LMHeadCustomModel):
             return_dict,
         )
 
+class QwenPrefixCausalLM(Qwen2ForCausalLM):
+    """Qwen2 model with prefix tuning support for security-aware code generation."""
+    
+    def __init__(self, config):
+        super().__init__(config)
+        
+        # Qwen uses GQA: num_key_value_heads (2) < num_attention_heads (12)
+        self.n_kv_heads = config.num_key_value_heads
+        self.n_embed_per_head = config.hidden_size // config.num_attention_heads
+        
+        self.prefix_params = torch.nn.ParameterList()
+        for _ in range(config.n_control):
+            for _ in range(config.num_hidden_layers):
+                for _ in range(2):  # key and value
+                    # Use KV heads count for GQA compatibility
+                    param_size = (self.n_kv_heads, config.n_prefix_token, self.n_embed_per_head)
+                    param = torch.nn.Parameter(torch.zeros(param_size, requires_grad=True))
+                    self.prefix_params.append(param)
+        self.dropout = torch.nn.Dropout(config.prefix_dropout)
+
+    def get_past_from_prefix(self, control_ids):
+        past = list()
+        for i in range(self.config.num_hidden_layers):
+            past.append(list())
+            key_stack, val_stack = [], []
+            for control_id in control_ids:
+                key_idx = control_id * self.config.num_hidden_layers * 2 + i * 2
+                val_idx = key_idx + 1
+                key = self.dropout(self.prefix_params[key_idx])
+                val = self.dropout(self.prefix_params[val_idx])
+                key_stack.append(key)
+                val_stack.append(val)
+            past[i].append(torch.stack(key_stack))
+            past[i].append(torch.stack(val_stack))
+        return past
+
+    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **kwargs):
+        # Follow the same pattern as CodeGenPrefixCausalLM
+        if past_key_values is not None:
+            # Subsequent steps: only use the last token
+            input_ids = input_ids[:, -1:]
+        else:
+            # First generation step: inject prefix as past_key_values
+            # Keep full input_ids!
+            control_id = kwargs.get('control_id', None)
+            if control_id is not None:
+                control_ids = [control_id] * input_ids.shape[0]
+                past_key_values = self.get_past_from_prefix(control_ids)
+
+        return {
+            "input_ids": input_ids,
+            "past_key_values": past_key_values,
+            "use_cache": kwargs.get("use_cache", True),
+            "attention_mask": kwargs.get("attention_mask"),
+            "position_ids": None,  # Let the model compute this
+        }
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        control_id = None,  # placeholder for passing checks of huggingface
+    ) -> Union[Tuple, CausalLMOutputWithPast]:
+        return super().forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            labels=labels,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
 def model_from_pretrained(lm_path, model_type, config):
     kwargs = dict()
     if lm_path.startswith('Salesforce/codegen-'):
@@ -278,6 +362,13 @@ def model_from_pretrained(lm_path, model_type, config):
             model_class = SantaPrefixLM
         else:
             assert False
+    elif lm_path.startswith('Qwen/Qwen2.5-Coder'):
+        if model_type == 'lm':
+            model_class = Qwen2ForCausalLM
+        elif model_type == 'prefix':
+            model_class = QwenPrefixCausalLM
+        else:
+            assert False
     else:
         assert False
 
@@ -291,6 +382,8 @@ def model_from_pretrained(lm_path, model_type, config):
 def config_from_pretrained(lm_path, path):
     if lm_path == 'bigcode/santacoder':
         return GPT2CustomConfig.from_pretrained(path, revision='mha')
+    elif lm_path.startswith('Qwen/Qwen2.5-Coder'):
+        return AutoConfig.from_pretrained(path)
     else:
         return AutoConfig.from_pretrained(path)
 
