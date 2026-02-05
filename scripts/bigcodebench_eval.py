@@ -248,14 +248,19 @@ def step_evaluate(args):
     
     if args.use_docker:
         # Use Docker for safe evaluation (recommended)
+        # Mount the experiments/bigcodebench directory, not scripts
+        experiments_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'experiments', 'bigcodebench'))
+        
         cmd = [
-            'docker', 'run', '-v', f'{os.getcwd()}:/app',
+            'docker', 'run', '--rm',
+            '-v', f'{experiments_dir}:/app',
             'bigcodebench/bigcodebench-evaluate:latest',
+            args.split,
+            args.subset,
             '--execution', 'local',
-            '--split', args.split,
-            '--subset', args.subset,
             '--samples', os.path.basename(args.calibrated_file),
             '--pass_k', args.pass_k,
+            '--save_pass_rate',
         ]
     else:
         # Local evaluation (fast but requires all dependencies)
