@@ -161,9 +161,10 @@ def eval_single(args, evaler, controls, output_dir, data_dir, vul_type, scenario
 
     for control_id, control in enumerate(controls):
         set_seed(args)
+        args.logger.info(f"[{scenario}] start sampling control={control}")
         with torch.no_grad():
             outputs, output_ids, dup_srcs, non_parsed_srcs = evaler.sample(file_context, func_context, control_id, info['language'])
-
+        args.logger.info(f"[{scenario}] done sampling n={len(outputs)} dup={len(dup_srcs)} non_parsed={len(non_parsed_srcs)}")
         out_src_dir = os.path.join(s_out_dir, f'{control}_output')
         os.makedirs(out_src_dir)
         output_ids_j = OrderedDict()
