@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import numpy as np
 from collections import OrderedDict
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
-from transformers import AdamW, get_linear_schedule_with_warmup
+from transformers import get_linear_schedule_with_warmup
 
 from sven.model import save_model, parallelize_model, load_model
 from sven.dataset import PrefixDataset, TextPromptDataset
@@ -83,7 +83,7 @@ class TrainerBase:
             {'params': [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay) and p.requires_grad],
             'weight_decay': 0.0}
         ]
-        optimizer = AdamW(optimizer_grouped_parameters, lr=self.args.learning_rate, eps=self.args.adam_epsilon)
+        optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=self.args.learning_rate, eps=self.args.adam_epsilon)
         scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=self.args.warmup_steps,
                                                 num_training_steps=total_steps)
 
@@ -162,9 +162,17 @@ class TrainerBase:
 def get_logits_from_lm(lm, inputs, control_ids):
     if control_ids is not None:
         past = lm.get_past_from_prefix(control_ids)
+        # For Qwen with prefix, need attention mask that includes prefix tokens
+        if hasattr(lm.config, 'n_prefix_token'):
+            prefix_len = lm.config.n_prefix_token
+            input_len = inputs.shape[1]
+            attention_mask = torch.ones(inputs.shape[0], prefix_len + input_len, device=inputs.device)
+        else:
+            attention_mask = None
     else:
         past = None
-    outputs = lm(inputs, past_key_values=past)
+        attention_mask = None
+    outputs = lm(inputs, past_key_values=past, attention_mask=attention_mask)
     shift_logits = outputs.logits[..., :-1, :]
     shift_labels = inputs[..., 1:].unsqueeze(-1)
     shift_probs = F.softmax(shift_logits, dim=-1)

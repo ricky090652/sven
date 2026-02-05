@@ -2,6 +2,7 @@ import os
 import torch
 from typing import Optional, Tuple, Union, List
 from transformers import AutoTokenizer, AutoConfig, logging, Qwen2ForCausalLM
+from transformers.cache_utils import DynamicCache
 from transformers.modeling_outputs import CausalLMOutputWithPast, CausalLMOutputWithCrossAttentions
 from sven.hf import CodeGenForCausalLM, XGLMForCausalLM, GPT2LMHeadCustomModel, GPT2CustomConfig
 
@@ -263,25 +264,32 @@ class QwenPrefixCausalLM(Qwen2ForCausalLM):
                 for _ in range(2):  # key and value
                     # Use KV heads count for GQA compatibility
                     param_size = (self.n_kv_heads, config.n_prefix_token, self.n_embed_per_head)
-                    param = torch.nn.Parameter(torch.zeros(param_size, requires_grad=True))
+                    param = torch.nn.Parameter(torch.randn(param_size, requires_grad=True) * 0.01)
                     self.prefix_params.append(param)
         self.dropout = torch.nn.Dropout(config.prefix_dropout)
 
     def get_past_from_prefix(self, control_ids):
-        past = list()
-        for i in range(self.config.num_hidden_layers):
-            past.append(list())
+        """Build past_key_values from prefix parameters using DynamicCache for new transformers."""
+        cache = DynamicCache()
+        
+        for layer_idx in range(self.config.num_hidden_layers):
             key_stack, val_stack = [], []
             for control_id in control_ids:
-                key_idx = control_id * self.config.num_hidden_layers * 2 + i * 2
+                key_idx = control_id * self.config.num_hidden_layers * 2 + layer_idx * 2
                 val_idx = key_idx + 1
                 key = self.dropout(self.prefix_params[key_idx])
                 val = self.dropout(self.prefix_params[val_idx])
                 key_stack.append(key)
                 val_stack.append(val)
-            past[i].append(torch.stack(key_stack))
-            past[i].append(torch.stack(val_stack))
-        return past
+            
+            # Stack along batch dimension: (batch, n_kv_heads, seq_len, head_dim)
+            layer_key = torch.stack(key_stack, dim=0)  # (batch, n_kv_heads, n_prefix, head_dim)
+            layer_val = torch.stack(val_stack, dim=0)
+            
+            # Update the cache for this layer
+            cache.update(layer_key, layer_val, layer_idx)
+        
+        return cache
 
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **kwargs):
         # Follow the same pattern as CodeGenPrefixCausalLM
@@ -422,6 +430,11 @@ def load_model(model_type, path, is_training, args):
             lm_config.prefix_dropout = args.dropout
             lm_config.n_control = 2
             model = model_from_pretrained(lm_path, model_type, lm_config)
+            # Reinitialize prefix params for Qwen models (from_pretrained may corrupt initialization)
+            if lm_path.startswith('Qwen/'):
+                with torch.no_grad():
+                    for param in model.prefix_params:
+                        param.data = torch.randn_like(param) * 0.01
         else:
             lm_path_file = os.path.join(path, 'lm.txt')
             assert os.path.exists(lm_path_file)

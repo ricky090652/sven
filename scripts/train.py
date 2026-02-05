@@ -51,6 +51,8 @@ def get_args():
             args.n_prefix_token = 8
         elif args.pretrain_dir == 'Salesforce/codegen-6B-multi':
             args.n_prefix_token = 12
+        elif args.pretrain_dir == 'Qwen/Qwen2.5-Coder-1.5B':
+            args.n_prefix_token = 6
         else:
             assert False
 
@@ -61,6 +63,8 @@ def get_args():
             args.num_train_epochs = 5
         elif args.pretrain_dir == 'Salesforce/codegen-6B-multi':
             args.num_train_epochs = 5
+        elif args.pretrain_dir == 'Qwen/Qwen2.5-Coder-1.5B':
+            args.num_train_epochs = 6
         else:
             assert False
 
@@ -71,6 +75,8 @@ def get_args():
             args.kl_loss_ratio = 1600
         elif args.pretrain_dir == 'Salesforce/codegen-6B-multi':
             args.kl_loss_ratio = 2000
+        elif args.pretrain_dir == 'Qwen/Qwen2.5-Coder-1.5B':
+            args.kl_loss_ratio = 1600
         else:
             assert False
 
