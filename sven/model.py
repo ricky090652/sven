@@ -371,6 +371,9 @@ def model_from_pretrained(lm_path, model_type, config):
         else:
             assert False
     elif lm_path.startswith('Qwen/Qwen2.5-Coder'):
+        # Enable BF16 and Flash Attention 2 for faster training
+        kwargs['torch_dtype'] = torch.bfloat16
+        kwargs['attn_implementation'] = 'flash_attention_2'
         if model_type == 'lm':
             model_class = Qwen2ForCausalLM
         elif model_type == 'prefix':
@@ -396,8 +399,8 @@ def config_from_pretrained(lm_path, path):
         return AutoConfig.from_pretrained(path)
 
 def save_model(model, path, args):
-    if type(model) in (CodeGenPrefixCausalLM, IncoderPrefixLM, SantaPrefixLM):
-        assert args.pretrain_dir.startswith('Salesforce/codegen-') or args.pretrain_dir.startswith('facebook/incoder-') or args.pretrain_dir == 'bigcode/santacoder'
+    if type(model) in (CodeGenPrefixCausalLM, IncoderPrefixLM, SantaPrefixLM, QwenPrefixCausalLM):
+        # For prefix models, only save the prefix parameters (not the full model)
         config_file = os.path.join(path)
         model.config.save_pretrained(config_file)
         prefix_file = os.path.join(path, 'pytorch_model.bin')
@@ -431,10 +434,11 @@ def load_model(model_type, path, is_training, args):
             lm_config.n_control = 2
             model = model_from_pretrained(lm_path, model_type, lm_config)
             # Reinitialize prefix params for Qwen models (from_pretrained may corrupt initialization)
+            # Also ensure they use BF16 dtype to match the model
             if lm_path.startswith('Qwen/'):
                 with torch.no_grad():
                     for param in model.prefix_params:
-                        param.data = torch.randn_like(param) * 0.01
+                        param.data = (torch.randn_like(param) * 0.01).to(torch.bfloat16)
         else:
             lm_path_file = os.path.join(path, 'lm.txt')
             assert os.path.exists(lm_path_file)
