@@ -291,25 +291,84 @@ class QwenPrefixCausalLM(Qwen2ForCausalLM):
         
         return cache
 
+    def generate(self, input_ids, **kwargs):
+        """Override generate to extend model_kwargs with prefix info before the loop."""
+        control_id = kwargs.pop('control_id', None)
+        self._pending_control_id = control_id
+        
+        if control_id is not None:
+            # Extend attention_mask with prefix ones in model_kwargs.
+            # This ensures _update_model_kwargs_for_generation correctly
+            # tracks the prefix tokens across ALL generation steps.
+            attention_mask = kwargs.get('attention_mask')
+            if attention_mask is None:
+                attention_mask = torch.ones_like(input_ids)
+            prefix_mask = torch.ones(
+                input_ids.shape[0], self.config.n_prefix_token,
+                dtype=attention_mask.dtype, device=attention_mask.device
+            )
+            kwargs['attention_mask'] = torch.cat([prefix_mask, attention_mask], dim=1)
+        
+        try:
+            result = super().generate(input_ids, **kwargs)
+        finally:
+            self._pending_control_id = None
+        return result
+
+    def _get_initial_cache_position(self, seq_length, device, model_kwargs):
+        """Override to offset cache_position by n_prefix when prefix is active."""
+        model_kwargs = super()._get_initial_cache_position(seq_length, device, model_kwargs)
+        if getattr(self, '_pending_control_id', None) is not None:
+            n_prefix = self.config.n_prefix_token
+            model_kwargs["cache_position"] = model_kwargs["cache_position"] + n_prefix
+        return model_kwargs
+
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **kwargs):
-        # Follow the same pattern as CodeGenPrefixCausalLM
-        if past_key_values is not None:
+        attention_mask = kwargs.get("attention_mask")
+        cache_position = kwargs.get("cache_position")
+
+        # Check if cache already has content (= subsequent step)
+        has_cached = (
+            past_key_values is not None
+            and hasattr(past_key_values, 'get_seq_length')
+            and past_key_values.get_seq_length() > 0
+        )
+
+        if has_cached:
             # Subsequent steps: only use the last token
             input_ids = input_ids[:, -1:]
+            if attention_mask is not None:
+                position_ids = attention_mask.long().cumsum(-1) - 1
+                position_ids.masked_fill_(attention_mask == 0, 1)
+                position_ids = position_ids[:, -1:]
+            else:
+                position_ids = None
         else:
-            # First generation step: inject prefix as past_key_values
-            # Keep full input_ids!
-            control_id = kwargs.get('control_id', None)
+            # First step: inject prefix into the cache
+            control_id = getattr(self, '_pending_control_id', None)
             if control_id is not None:
                 control_ids = [control_id] * input_ids.shape[0]
-                past_key_values = self.get_past_from_prefix(control_ids)
+                prefix_cache = self.get_past_from_prefix(control_ids)
+                if past_key_values is not None and hasattr(past_key_values, 'update'):
+                    for layer_idx in range(len(prefix_cache)):
+                        k, v = prefix_cache[layer_idx]
+                        past_key_values.update(k, v, layer_idx)
+                else:
+                    past_key_values = prefix_cache
+
+            # Set position_ids from cache_position (already offset by generate)
+            if cache_position is not None:
+                position_ids = cache_position.unsqueeze(0).expand(input_ids.shape[0], -1)
+            else:
+                position_ids = None
 
         return {
             "input_ids": input_ids,
             "past_key_values": past_key_values,
             "use_cache": kwargs.get("use_cache", True),
-            "attention_mask": kwargs.get("attention_mask"),
-            "position_ids": None,  # Let the model compute this
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+            "cache_position": cache_position,
         }
 
     def forward(
@@ -324,6 +383,7 @@ class QwenPrefixCausalLM(Qwen2ForCausalLM):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
         control_id = None,  # placeholder for passing checks of huggingface
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         return super().forward(
@@ -337,6 +397,7 @@ class QwenPrefixCausalLM(Qwen2ForCausalLM):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            cache_position=cache_position,
         )
 
 def model_from_pretrained(lm_path, model_type, config):
