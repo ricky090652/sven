@@ -24,6 +24,7 @@ from torch.nn import CrossEntropyLoss
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
+from transformers.generation import GenerationMixin
 from transformers.utils import add_code_sample_docstrings, add_start_docstrings, add_start_docstrings_to_model_forward, logging
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 from transformers.models.codegen.configuration_codegen import CodeGenConfig
@@ -658,7 +659,7 @@ class CodeGenModel(CodeGenPreTrainedModel):
     """,
     CODEGEN_START_DOCSTRING,
 )
-class CodeGenForCausalLM(CodeGenPreTrainedModel):
+class CodeGenForCausalLM(CodeGenPreTrainedModel, GenerationMixin):
     _keys_to_ignore_on_load_missing = [r"h\.\d+\.attn\.masked_bias", r"h\.\d+\.attn\.bias"]
 
     def __init__(self, config):
