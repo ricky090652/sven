@@ -16,7 +16,7 @@ class CodeGenPrefixCausalLM(CodeGenForCausalLM):
             for _ in range(config.n_layer):
                 for _ in range(2):
                     param_size = (config.n_head, config.n_prefix_token, self.n_embed_per_head)
-                    param = torch.nn.Parameter(torch.zeros(param_size, requires_grad=True))
+                    param = torch.nn.Parameter(torch.randn(param_size, requires_grad=True) * 0.01)
                     self.prefix_params.append(param)
         self.dropout = torch.nn.Dropout(config.prefix_dropout)
 
@@ -494,12 +494,15 @@ def load_model(model_type, path, is_training, args):
             lm_config.prefix_dropout = args.dropout
             lm_config.n_control = 2
             model = model_from_pretrained(lm_path, model_type, lm_config)
-            # Reinitialize prefix params for Qwen models (from_pretrained may corrupt initialization)
-            # Also ensure they use BF16 dtype to match the model
-            if lm_path.startswith('Qwen/'):
-                with torch.no_grad():
-                    for param in model.prefix_params:
-                        param.data = (torch.randn_like(param) * 0.01).to(torch.bfloat16)
+            # Ensure prefix params use the same dtype as the model's weights.
+            # Models like CodeGen-350M load in float16 and Qwen in bfloat16.
+            # Prefix params are created as float32 by default, causing dtype
+            # mismatches when they are concatenated with model's key/value tensors
+            # in the attention forward pass, which leads to NaN loss.
+            model_dtype = next(model.parameters()).dtype
+            with torch.no_grad():
+                for param in model.prefix_params:
+                    param.data = (torch.randn(param.shape) * 0.01).to(model_dtype)
         else:
             lm_path_file = os.path.join(path, 'lm.txt')
             assert os.path.exists(lm_path_file)

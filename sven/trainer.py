@@ -162,8 +162,10 @@ class TrainerBase:
 def get_logits_from_lm(lm, inputs, control_ids):
     if control_ids is not None:
         past = lm.get_past_from_prefix(control_ids)
-        # For Qwen with prefix, need attention mask that includes prefix tokens
-        if hasattr(lm.config, 'n_prefix_token'):
+        # Only Qwen models need an extended attention mask that includes prefix tokens.
+        # CodeGen handles prefix via past_key_values directly without needing an explicit mask.
+        from sven.model import QwenPrefixCausalLM
+        if isinstance(lm, QwenPrefixCausalLM) and hasattr(lm.config, 'n_prefix_token'):
             prefix_len = lm.config.n_prefix_token
             input_len = inputs.shape[1]
             attention_mask = torch.ones(inputs.shape[0], prefix_len + input_len, device=inputs.device)
@@ -233,7 +235,7 @@ class PrefixTrainer(TrainerBase):
             if self.args.contrastive_loss_ratio != 0:
                 contrastive_probs = torch.stack((correct_label_probs, incorrect_label_probs), dim=1)
                 contrastive_probs = F.normalize(contrastive_probs, p=1, dim=-1)
-                contrastive_log_probs = torch.log(contrastive_probs)
+                contrastive_log_probs = torch.log(contrastive_probs.clamp(min=1e-7))
                 contrastive_labels = torch.zeros(shift_inputs.shape, dtype=torch.int64).to(self.input_device)
                 contrastive_loss = token_weighted_loss('nll', contrastive_log_probs, contrastive_labels, shift_weights)
                 contrastive_loss *= self.args.contrastive_loss_ratio / 100
