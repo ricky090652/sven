@@ -1,4 +1,5 @@
 codeql
+codeql-linux64.zip
 experiments/
 .DS_Store
 
@@ -126,6 +127,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.venv1
 env/
 venv/
 ENV/
@@ -162,3 +164,14 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+# Custom ignored files
+scripts/-.o
+scripts/BIGCODEBENCH_README.md
+scripts/DOCKER_SETUP.md
+scripts/security_comparison_350m.png
+
+# Ignore all trained models but allow specific checkpoint
+trained/*
+!trained/350m-prefix-oldv-test1/
+trained/350m-prefix-oldv-test1/*
+!trained/350m-prefix-oldv-test1/checkpoint-last/
