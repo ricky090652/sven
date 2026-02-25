@@ -167,3 +167,4 @@ cython_debug/
 *.md
 *.zip
 trained/*/*checkpoint-epoch-*
+*.venv1
