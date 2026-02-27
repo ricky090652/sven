@@ -172,17 +172,35 @@ def get_logits_from_lm(lm, inputs, control_ids):
 
 def token_weighted_loss(loss_type, inputs, targets, weights):
     if loss_type == 'cross_entropy':
+        inputs = inputs.view(-1, inputs.size(-1))
+        targets = targets.view(-1)
+        weights = weights.view(-1)
         loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+        loss = loss_fct(inputs, targets)
     elif loss_type == 'nll':
+        inputs = inputs.view(-1, inputs.size(-1))
+        targets = targets.view(-1)
+        weights = weights.view(-1)
         loss_fct = torch.nn.NLLLoss(reduction='none')
+        loss = loss_fct(inputs, targets)
+    elif loss_type == 'ul':
+        inputs = inputs.view(-1, inputs.size(-1))
+        targets = targets.view(-1)
+        weights = weights.view(-1)
+        probs = F.softmax(inputs, dim=-1)
+        probs = torch.gather(probs, 1, targets.unsqueeze(-1)).squeeze(-1)
+        probs = torch.clamp((1.0-probs), min=1e-5)
+        loss = -torch.log(probs)
     elif loss_type == 'kl':
+        inputs = inputs.view(-1, inputs.size(-1))
+        targets = targets.view(-1, targets.size(-1))
+        weights = weights.view(-1)
         loss_fct = torch.nn.KLDivLoss(log_target=True, reduction='none')
+        loss = loss_fct(inputs, targets)
+        loss = loss.sum(dim=1)
     else:
         assert False
-
-    loss = loss_fct(inputs, targets)
-    if loss_type == 'kl':
-        loss = loss.sum(dim=1)
+    
     loss = loss[weights != 0]
     return loss.mean()
 
@@ -212,42 +230,32 @@ class PrefixTrainer(TrainerBase):
         shift_weights = weights[..., 1:].squeeze(0)
         control_ids = control_ids.to(self.input_device)
 
-        correct_logits, correct_label_probs = get_logits_from_lm(self.model, inputs, control_ids)
-        lm_loss = token_weighted_loss('cross_entropy', correct_logits, shift_inputs, shift_weights)
-        lm_loss *= self.args.lm_loss_ratio
-        return_dict['lm_loss'] = lm_loss.item()
 
-        if self.args.contrastive_loss_ratio != 0 or self.args.kl_loss_ratio != 0:
-            incorrect_control_ids = -1 * (control_ids - 1)
-            incorrect_logits, incorrect_label_probs = get_logits_from_lm(self.model, inputs, incorrect_control_ids)
+        prefix_ids = torch.zeros_like(control_ids).to(self.input_device)
+        logits, _ = get_logits_from_lm(self.model, inputs, prefix_ids)
+        is_vul_sample = (control_ids.item() == 1)
 
-            contrastive_loss = 0
-            if self.args.contrastive_loss_ratio != 0:
-                contrastive_probs = torch.stack((correct_label_probs, incorrect_label_probs), dim=1)
-                contrastive_probs = F.normalize(contrastive_probs, p=1, dim=-1)
-                contrastive_log_probs = torch.log(contrastive_probs)
-                contrastive_labels = torch.zeros(shift_inputs.shape, dtype=torch.int64).to(self.input_device)
-                contrastive_loss = token_weighted_loss('nll', contrastive_log_probs, contrastive_labels, shift_weights)
-                contrastive_loss *= self.args.contrastive_loss_ratio / 100
-                return_dict['contrastive_loss'] = contrastive_loss.item()
+        if not is_vul_sample:
+            loss = token_weighted_loss('cross_entropy', logits, shift_inputs, shift_weights)
+            loss *= self.args.lm_loss_ratio   
+        else:
+            loss = token_weighted_loss('ul', logits, shift_inputs, shift_weights)
+            loss *= self.args.lm_loss_ratio
 
-            kl_loss = 0
-            if self.args.kl_loss_ratio != 0:
-                correct_log_probs = F.log_softmax(correct_logits, dim=-1)
-                self.model.eval()
-                with torch.no_grad():
-                    ref_logits, _ = get_logits_from_lm(self.model, inputs, None)
-                self.model.train()
-                ref_log_probs = F.log_softmax(ref_logits, dim=-1)
-                kl_loss += token_weighted_loss('kl', correct_log_probs, ref_log_probs, 1-shift_weights)
-                incorrect_log_probs = F.log_softmax(incorrect_logits, dim=-1)
-                kl_loss += token_weighted_loss('kl', incorrect_log_probs, ref_log_probs, 1-shift_weights)
-                kl_loss = kl_loss * self.args.kl_loss_ratio / 1000
-                return_dict['kl_loss'] = kl_loss.item()
+        if self.args.kl_loss_ratio != 0:
+            correct_log_probs = F.log_softmax(logits, dim=-1)
+            self.model.eval()
+            with torch.no_grad():
+                ref_logits, _ = get_logits_from_lm(self.model, inputs, None)
+            self.model.train()
+            ref_log_probs = F.log_softmax(ref_logits, dim=-1)
+            kl_loss = token_weighted_loss('kl', correct_log_probs, ref_log_probs, 1 - shift_weights)
+            kl_loss = kl_loss * self.args.kl_loss_ratio / 1000
+            return_dict['kl_loss'] = kl_loss.item()
 
-        loss = lm_loss + contrastive_loss + kl_loss
-        return_dict['loss'] = loss.item()
-        return loss, return_dict
+        total_loss = loss + kl_loss
+        return_dict['loss'] = total_loss.item()
+        return total_loss, return_dict
 
 class TextPromptTrainer(TrainerBase):
 
