@@ -168,3 +168,5 @@ cython_debug/
 *.zip
 trained/*/*checkpoint-epoch-*
 *.venv1
+command.txt
+trained/350m-prefix-oldv-new/*
