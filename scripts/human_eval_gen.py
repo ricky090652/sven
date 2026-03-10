@@ -23,7 +23,7 @@ def get_args():
 
     parser.add_argument('--temp', type=float, default=0.4)
     parser.add_argument('--top_p', type=float, default=0.95)
-    parser.add_argument('--max_gen_len', type=int, default=300)
+    parser.add_argument('--max_gen_len', type=int, default=100)
     parser.add_argument('--num_samples', type=int, default=100)
     parser.add_argument('--num_samples_per_gen', type=int, default=25)
 
@@ -75,8 +75,9 @@ def main():
         model_dir = args.model_dir
 
     args.n_gpu = torch.cuda.device_count()
-    args.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    args.device = torch.device('cuda')
     tokenizer, model, device = load_model('prefix' if args.model_type == 'prefix' else 'lm', model_dir, False, args)
+    print(args.device)
     model.eval()
 
     for problem_yaml_path in tqdm(problems):
