@@ -175,3 +175,5 @@ trained/*
 !trained/350m-prefix-oldv-test1/
 trained/350m-prefix-oldv-test1/*
 !trained/350m-prefix-oldv-test1/checkpoint-last/
+command.txt
+*.png
