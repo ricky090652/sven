@@ -41,6 +41,7 @@ sys.path.insert(0, _SCRIPT_DIR)
 
 from sven.utils import parse_diff                            # SVEN diff parser
 from codeql_validator import scan_with_codeql, SUPPORTED_CWE_QL
+from llm_filter import count_diff_lines, is_security_only_change
 
 # ── Extend CodeQL support at runtime for new CWEs ────────────────────────────
 _QL_REPO = os.path.join(_SVEN_ROOT, "codeql", "codeql-repo")
@@ -246,8 +247,8 @@ def _load_crossvul(
         }
 
 
-_CVEFIXES_BEFORE_COLS = ["func_before", "vulnerable_func", "code_before", "before"]
-_CVEFIXES_AFTER_COLS  = ["func_after",  "patched_func",    "code_after",  "after"]
+_CVEFIXES_BEFORE_COLS = ["func_before", "vulnerable_func", "vulnerable_code", "code_before", "before"]
+_CVEFIXES_AFTER_COLS  = ["func_after",  "patched_func",    "fixed_code",      "code_after",  "after"]
 _CVEFIXES_LANG_COLS   = ["language", "lang", "programming_language"]
 _CVEFIXES_CWE_COLS    = ["cwe_id", "CWE_ID", "cwe", "CWE"]
 
@@ -387,6 +388,14 @@ def get_args() -> argparse.Namespace:
                    help="Skip all CodeQL validation.")
     p.add_argument("--trust-dataset-labels", action="store_true",
                    help="Skip CodeQL scan on vulnerable-before code (recommended for C).")
+    p.add_argument("--max-diff-lines", type=int, default=None, metavar="N",
+                   help="Skip pairs whose diff exceeds N changed lines (e.g. 40). "
+                        "Default: no limit.")
+    p.add_argument("--llm-filter", action="store_true",
+                   help="Use an LLM to filter out diffs that contain non-security changes. "
+                        "Requires OPENAI_API_KEY env var.")
+    p.add_argument("--llm-model", default="gpt-4o-mini", metavar="MODEL",
+                   help="LLM model to use for --llm-filter. Default: gpt-4o-mini.")
     p.add_argument("--dry-run", action="store_true",
                    help="Process pairs but do not write files.")
     return p.parse_args()
@@ -416,7 +425,9 @@ def main() -> None:
     log.info("=" * 62)
 
     stats: dict[str, dict] = defaultdict(
-        lambda: {"loaded": 0, "vul_ok": 0, "sec_ok": 0, "saved": 0, "skipped": 0}
+        lambda: {"loaded": 0, "vul_ok": 0, "sec_ok": 0,
+                 "diff_skip": 0, "llm_skip": 0,
+                 "saved": 0, "skipped": 0}
     )
     out_handles: dict[str, Any] = {}
 
@@ -487,7 +498,23 @@ def main() -> None:
                 else:
                     st["sec_ok"] += 1
 
-                # ── 3. Convert to SVEN JSONL (identical to original) ─────
+                # ── 3. Diff line-count filter (opt-in) ───────────────────
+                if args.max_diff_lines is not None:
+                    n_diff = count_diff_lines(before, after)
+                    if n_diff > args.max_diff_lines:
+                        log.debug("[%s] diff too large (%d lines > %d), skipping.",
+                                  key, n_diff, args.max_diff_lines)
+                        st["diff_skip"] += 1
+                        continue
+
+                # ── 4. LLM security-relevance filter (opt-in) ─────────────
+                if args.llm_filter:
+                    if not is_security_only_change(before, after, cwe, model=args.llm_model):
+                        log.info("[%s] LLM says diff contains non-security changes, skipping.", key)
+                        st["llm_skip"] += 1
+                        continue
+
+                # ── 5. Convert to SVEN JSONL (identical to original) ─────
                 entry = pair_to_sven_entry(
                     before=before,
                     after=after,
@@ -501,7 +528,7 @@ def main() -> None:
                     st["skipped"] += 1
                     continue
 
-                # ── 4. Write ─────────────────────────────────────────────
+                # ── 6. Write ─────────────────────────────────────────────
                 st["saved"] += 1
                 if args.dry_run:
                     log.info("[DRY-RUN] %s  func=%s", key, entry.get("func_name", "?"))
@@ -522,13 +549,15 @@ def main() -> None:
     log.info("=" * 62)
     log.info("Collection complete")
     log.info("=" * 62)
-    log.info("%-35s %7s %7s %7s %7s %7s",
-             "bucket", "loaded", "vul_ok", "sec_ok", "saved", "skip")
+    log.info("%-35s %7s %7s %7s %7s %7s %7s %7s",
+             "bucket", "loaded", "vul_ok", "sec_ok", "d_skip", "l_skip", "saved", "skip")
     total = 0
     for key in sorted(stats):
         s = stats[key]
-        log.info("%-35s %7d %7d %7d %7d %7d",
-                 key, s["loaded"], s["vul_ok"], s["sec_ok"], s["saved"], s["skipped"])
+        log.info("%-35s %7d %7d %7d %7d %7d %7d %7d",
+                 key, s["loaded"], s["vul_ok"], s["sec_ok"],
+                 s["diff_skip"], s["llm_skip"],
+                 s["saved"], s["skipped"])
         total += s["saved"]
     log.info("%-35s %7s %7s %7s %7d", "TOTAL", "", "", "", total)
     log.info("Output: %s", args.output_dir)

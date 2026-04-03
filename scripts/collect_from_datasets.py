@@ -39,6 +39,7 @@ sys.path.insert(0, _SVEN_ROOT)
 from sven.utils import parse_diff                       # SVEN diff parser
 from codeql_validator import scan_with_codeql, SUPPORTED_CWE_QL
 from dataset_loaders   import load_all_pairs, SUPPORTED_CWES
+from llm_filter import count_diff_lines, is_security_only_change
 
 # ─────────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -90,6 +91,20 @@ def get_args() -> argparse.Namespace:
         help="Trust the dataset's vulnerability label (skip CodeQL check on the BEFORE "
              "code). Still validates that AFTER code is clean. Recommended for BigVul/C "
              "where isolated function snippets rarely have explicit taint sources.",
+    )
+    p.add_argument(
+        "--max-diff-lines", type=int, default=None, metavar="N",
+        help="Skip pairs whose diff exceeds N changed lines (e.g. 40). "
+             "Default: no limit.",
+    )
+    p.add_argument(
+        "--llm-filter", action="store_true",
+        help="Use an LLM to filter out diffs that contain non-security changes. "
+             "Requires OPENAI_API_KEY env var.",
+    )
+    p.add_argument(
+        "--llm-model", default="gpt-4o-mini", metavar="MODEL",
+        help="LLM model to use for --llm-filter. Default: gpt-4o-mini.",
     )
     p.add_argument(
         "--dry-run", action="store_true",
@@ -163,7 +178,9 @@ def main() -> None:
 
     # ── Stat counters ────────────────────────────────────────────────────
     stats: dict[str, dict] = defaultdict(lambda: {
-        "loaded": 0, "vul_ok": 0, "sec_ok": 0, "saved": 0, "skipped": 0
+        "loaded": 0, "vul_ok": 0, "sec_ok": 0,
+        "diff_skip": 0, "llm_skip": 0,
+        "saved": 0, "skipped": 0,
     })
 
     # ── Output file handles (lazy open) ─────────────────────────────────
@@ -240,7 +257,23 @@ def main() -> None:
             else:
                 st["sec_ok"] += 1
 
-            # ── 3. Convert to SVEN JSONL format ──────────────────────────
+            # ── 3. Diff line-count filter (opt-in) ────────────────────────
+            if args.max_diff_lines is not None:
+                n_diff = count_diff_lines(before, after)
+                if n_diff > args.max_diff_lines:
+                    log.debug("[%s] diff too large (%d lines > %d), skipping.",
+                              key, n_diff, args.max_diff_lines)
+                    st["diff_skip"] += 1
+                    continue
+
+            # ── 4. LLM security-relevance filter (opt-in) ─────────────────
+            if args.llm_filter:
+                if not is_security_only_change(before, after, cwe, model=args.llm_model):
+                    log.info("[%s] LLM says diff contains non-security changes, skipping.", key)
+                    st["llm_skip"] += 1
+                    continue
+
+            # ── 5. Convert to SVEN JSONL format ──────────────────────────
             entry = pair_to_sven_entry(
                 before=before,
                 after=after,
@@ -255,7 +288,7 @@ def main() -> None:
                 st["skipped"] += 1
                 continue
 
-            # ── 4. Write entry ────────────────────────────────────────────
+            # ── 6. Write entry ────────────────────────────────────────────
             st["saved"] += 1
             if args.dry_run:
                 log.info("[DRY-RUN] Would write 1 entry → %s.jsonl  (func: %s)",
@@ -278,8 +311,10 @@ def main() -> None:
     total_saved = 0
     for key, st in sorted(stats.items()):
         log.info(
-            "  %-20s  loaded=%-5d  vul_ok=%-5d  sec_ok=%-5d  saved=%-5d  skipped=%d",
-            key, st["loaded"], st["vul_ok"], st["sec_ok"], st["saved"], st["skipped"],
+            "  %-20s  loaded=%-5d  vul_ok=%-5d  sec_ok=%-5d  diff_skip=%-5d  llm_skip=%-5d  saved=%-5d  skipped=%d",
+            key, st["loaded"], st["vul_ok"], st["sec_ok"],
+            st["diff_skip"], st["llm_skip"],
+            st["saved"], st["skipped"],
         )
         total_saved += st["saved"]
     log.info("  %-20s  total=%d", "TOTAL", total_saved)
