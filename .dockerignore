@@ -1,0 +1,27 @@
+# .dockerignore - 告訴 Docker build 時要忽略哪些檔案
+# 就像 .gitignore 一樣，避免把不需要的大檔案複製進 image
+
+# Python 虛擬環境（不需要，container 裡會重新安裝）
+.venv*/
+
+# Git 資料
+.git/
+
+# 實驗結果和模型 checkpoint（太大了，用 volume 掛載就好）
+experiments/
+models/
+*.pt
+*.bin
+*.safetensors
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE 設定
+.vscode/
+.idea/
+
+# CodeQL（太大）
+codeql/
