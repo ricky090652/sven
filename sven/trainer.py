@@ -232,16 +232,21 @@ class PrefixTrainer(TrainerBase):
 
 
         prefix_ids = torch.zeros_like(control_ids).to(self.input_device)
-        logits, _ = get_logits_from_lm(self.model, inputs, prefix_ids)
         is_vul_sample = (control_ids.item() == 1)
 
-        if not is_vul_sample:
-            loss = token_weighted_loss('cross_entropy', logits, shift_inputs, shift_weights)
-            loss *= self.args.lm_loss_ratio   
-        else:
-            loss = token_weighted_loss('ul', logits, shift_inputs, shift_weights)
-            loss *= self.args.lm_loss_ratio
+        # 只對 secure 樣本訓練，跳過 vulnerable 樣本
+        if is_vul_sample:
+            zero_loss = torch.tensor(0.0, device=self.input_device, requires_grad=True)
+            return_dict['loss'] = 0.0
+            return zero_loss, return_dict
 
+        logits, _ = get_logits_from_lm(self.model, inputs, prefix_ids)
+
+        loss = token_weighted_loss('cross_entropy', logits, shift_inputs, shift_weights)
+        loss *= self.args.lm_loss_ratio
+        return_dict['lm_loss'] = loss.item()
+
+        kl_loss = 0
         if self.args.kl_loss_ratio != 0:
             correct_log_probs = F.log_softmax(logits, dim=-1)
             self.model.eval()
