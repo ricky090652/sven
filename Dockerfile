@@ -58,16 +58,19 @@ COPY requirements_freeze.txt .
 RUN pip3 install --no-cache-dir -r requirements_freeze.txt
 
 # ----------------------------------------------------------
-# 複製專案程式碼並安裝
+# 複製啟動腳本
 # ----------------------------------------------------------
-# 複製整個專案進 image
-COPY . .
+# entrypoint.sh 會在 container 每次啟動時自動執行 pip install -e .
+# 這是為了解決 volume 掛載覆蓋 .egg-info 的問題
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
-# 以 editable 模式安裝 sven 套件
-RUN pip3 install -e .
-
 # ----------------------------------------------------------
-# CMD：container 啟動時預設執行的指令
+# ENTRYPOINT + CMD
 # ----------------------------------------------------------
-# 這裡設定啟動後直接進入 bash shell，讓你可以互動操作
+# ENTRYPOINT：container 啟動時「一定會執行」的腳本
+#   → 負責重新安裝 sven 套件（因為 volume 掛載會覆蓋 image 裡的檔案）
+# CMD：預設指令，會被傳給 entrypoint.sh 的 "$@"
+#   → 預設打開 bash shell
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/bin/bash"]
